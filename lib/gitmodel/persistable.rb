@@ -132,6 +132,12 @@ module GitModel
           @new_record = false
         end
 
+        if result
+          @path = dir
+          @branch = transaction.branch
+          @new_record = false
+        end
+
         result
       end
     end
@@ -159,6 +165,13 @@ module GitModel
       "#<#{self.class.name}:#{__id__} id=#{id}, attributes=#{attributes.inspect}, tree.keys=#{tree.keys.inspect}>"
     end
 
+    def path
+      @path ||= File.join(self.class.db_subdir, self.id)      
+    end
+
+    def branch
+      @branch ||= GitModel.default_branch
+    end
 
     private
 

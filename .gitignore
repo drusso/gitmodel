@@ -1,6 +1,7 @@
 *.gem
 .DS_Store
 .bundle
+Gemfile.lock
 .gitmodel-data
 coverage
 pkg

@@ -84,20 +84,27 @@ Usage
       attribute :categories, :default => []
       attribute :allow_comments, :default => true
 
-      blob :image
+      blob :thumbnail
+      tree :images
     end
 
     p1 = Post.new(:id => 'lessons-learned', :title => 'Lessons learned', :body => '...')
-    p1.image = some_binary_data
+    p1.thumbnail = binary_data
+    p1.images = {
+      :image_name_1 => more_binary_data, 
+      :image_name_2 => and_more_binary_data
+    }
     p1.save!
 
     p = Post.find('lessons-learned')
 
     p2 = Post.new(:id => 'hotdog-eating-contest', :title => 'I won!')
     p2.body = 'This weekend I won a hotdog eating contest!'
-    p2.image = some_binary_data
-    p2.blobs['hotdogs.jpg'] = some_binary_data
-    p2.blobs['the-aftermath.jpg'] = some_binary_data
+    p2.thumbnail = binary_data
+    p2.tree['images']['the-aftermath.jpg'] = more_binary_data
+    p2.tree['extra'] = {
+      'info.txt' => 'info'
+    }
     p2.save!
 
     p3 = Post.create!(:id => 'running-with-scissors', :title => 'Running with scissors', :body => '...')

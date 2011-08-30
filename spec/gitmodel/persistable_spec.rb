@@ -50,7 +50,7 @@ describe GitModel::Persistable do
       (repo.commits.first.tree / File.join(TestEntity.db_subdir, id, 'attributes.json')).data.should_not be_nil
     end
 
-    it 'stores attributes in a JSON file' do
+    it 'stores attributes in the attributes.json file' do
       id = 'foo'
       attrs = {:one => 1, :two => 2}
       TestEntity.create!(:id => id, :attributes => attrs)
@@ -63,32 +63,85 @@ describe GitModel::Persistable do
       r['two'].should == 2
     end
 
-    it 'stores blobs in files' do
-      id = 'foo'
-      blobs = {'blob1.txt' => 'This is blob 1'}
-      TestEntity.create!(:id => id, :blobs => blobs)
+    context 'when storing trees and blobs' do
 
-      repo = Grit::Repo.new(GitModel.db_root)
-      (repo.commits.first.tree / File.join(TestEntity.db_subdir, id, 'blob1.txt')).data.should == 'This is blob 1'
-    end
+      let(:tree) do
+        {
+          :christmas => {
+            :ornament => 'a',
+            :light => 'b',
+            :branch => {
+              :short => 'c',
+              :long => 'd'
+            }
+          },
+          :break => 'blob content'
+        }
+      end
 
-    it 'can store attributes and blobs' do
-      id = 'foo'
-      attrs = {:one => 1, :two => 2}
-      blobs = {'blob1.txt' => 'This is blob 1'}
-      TestEntity.create!(:id => id, :attributes => attrs, :blobs => blobs)
+      it 'stores blobs as files and they are appropriately nested within directories' do
+        record = TestEntity.create(:id => 'foo', :tree => tree)
 
-      r = TestEntity.find('foo')
-      r.attributes['one'].should == 1
-      r.attributes['two'].should == 2
-      r.blobs['blob1.txt'].should == 'This is blob 1'
+        paths_that_should_exist = %w[
+          christmas/
+          christmas/ornament
+          christmas/light/
+          christmas/branch/short
+          christmas/branch/long
+          break
+        ]
+
+        root = Grit::Repo.new(GitModel.db_root).tree / record.path
+        paths_that_should_exist.each { |path| (root/path).should_not == nil }
+      end
+
+      it 'deletes blobs that are explicitly excluded from the record\'s tree' do
+        record = TestEntity.create(:id => 'foobar', :tree => tree)
+        record.tree = { :christmas => { :branch => { :short => false } } }
+        record.save
+
+        paths_that_should_exist = %w[
+          christmas/
+          christmas/ornament
+          christmas/light/
+          christmas/branch/long
+          break
+        ]
+
+        paths_that_should_not_exist = %w[
+          christmas/branch/short
+        ]
+
+        root = Grit::Repo.new(GitModel.db_root).tree/record.path
+        paths_that_should_exist.each { |p| (root/p).should_not == nil }
+        paths_that_should_not_exist.each { |p| (root/p).should == nil }
+      end
+
+      it 'ignores an attributes.json blob when saving the tree' do
+        record = TestEntity.new(:id => 'foobar')
+        record.attributes = { :foo => 100 }
+        record.tree = tree.merge({ 'attributes.json' => 'xyz' })
+        record.save
+
+        # Before reload
+        record.attributes['foo'].should == 100
+        record.tree['attributes.json'].should == 'xyz'
+
+        # Check the contents of attribute.json
+        attributes_file_content = (Grit::Repo.new(GitModel.db_root).tree/record.path/'attributes.json').data
+        attributes_file_content.should_not == 'xyz'
+
+        # After reload
+        record.reload
+        record.attributes['foo'].should == 100
+        record.tree['attributes.json'].should == nil
+      end
+
     end
 
     it 'returns false if the validations failed'
 
     it 'returns the SHA of the commit if the save was successful'
-
-    it 'deletes blobs that have been removed'
 
     it 'updates the index' do
       # TODO
@@ -105,43 +158,155 @@ describe GitModel::Persistable do
 
   end
 
+  describe '#load' do
+
+    let(:path) do
+      File.join(TestEntity.db_subdir, 'foo')
+    end
+
+    let(:record) do
+      record = TestEntity.new
+      record.send(:load, path, 'master')
+      record
+    end
+
+    context 'when the record does not exist' do
+
+      it 'raises an exception if the document is not found' do
+        lambda { TestEntity.new.send(:load, path, 'master') }.should raise_error
+      end
+
+    end
+
+    context 'when the record exists' do
+
+      before do
+        attrs = { :one => 1, :two => 2 }
+        tree = {
+          :foo => '1',
+          :bar => {
+            :foo => '2',
+            :bar => '3',
+            :baz => {
+              :foo => '4',
+              :bar => '5'
+            }
+          }
+        }
+
+        TestEntity.create(:id => 'foo', :attributes => attrs, :tree => tree)
+      end
+
+      it 'returns the loaded instance' do
+        record = TestEntity.new
+        record.send(:load, path, 'master').should == record
+      end
+
+      it 'loads attributes' do
+        record.attributes['one'].should == 1
+        record.attributes['two'].should == 2
+      end
+
+      it 'loads trees and blobs' do
+        record.tree['foo'].should == '1'
+        record.tree['bar']['foo'].should == '2'
+        record.tree['bar']['bar'].should == '3'
+        record.tree['bar']['baz'].should be_a Hash
+        record.tree['bar']['baz']['foo'].should == '4'
+        record.tree['bar']['baz']['bar'].should == '5'
+      end
+
+      it 'does not load attribute.json into the tree' do
+        record.tree['attributes.json'].should == nil
+      end
+
+      context 'when the record is already loaded' do
+
+        it 'reloads persisted attributes' do
+          record.attributes['one'] = 100
+          record.attributes['unsaved'] = 'foo'
+          record.send(:load, path, 'master')
+          record.attributes['one'].should == 1
+          record.attributes['two'].should == 2
+          record.attributes['unsaved'].should == nil
+        end
+
+        it 'reloads the tree' do
+          record.tree['foo'] = 100
+          record.tree['unsaved'] = 'foo'
+          record.send(:load, path, 'master')
+          record.tree['foo'].should == '1'
+          record.tree['unsaved'] == nil
+        end
+
+      end
+
+    end
+
+  end
+
   describe '#new' do
+
     it 'creates a new unsaved instance' do
       TestEntity.new.new_record?.should be_true
     end
 
-    it 'takes an optional hash to set id, attributes and blobs' do
-      o = TestEntity.new(:id => 'foo', :attributes => {:one => 1}, :blobs => {'blob1.txt' => 'This is blob 1'})
-      o.id.should == 'foo'
-      o.attributes['one'].should == 1
-      o.blobs['blob1.txt'].should == 'This is blob 1'
+    it 'takes an optional hash to set id' do
+      TestEntity.new(:id => 'foo').id.should == 'foo'
     end
+
+    it 'takes an optional hash to set attributes' do
+      record = TestEntity.new(:attributes => { :one => 1 })
+      record.attributes['one'].should == 1
+    end
+
+    it 'takes an optional hash to set the tree' do
+      record = TestEntity.new(:tree => { :foo => 'blob', :bar => {} })
+      record.tree['foo'].should == 'blob'
+      record.tree['bar'].should == {}
+    end
+
+    it 'takes values for each defined attribute' do
+      foo = TestEntity.dup
+      foo.attribute(:bar)
+      record = foo.new(:bar => 'baz')
+      record.bar.should == 'baz'
+    end
+
+    it 'takes values for each defined blob' do
+      foo = TestEntity.dup
+      foo.blob(:bar)
+      record = foo.new(:bar => 'a')
+      record.tree['bar'].should == 'a'
+    end
+
+    it 'takes values for each defined tree' do
+      foo = TestEntity.dup
+      foo.tree(:bar)
+      record = foo.new(:bar => { :baz => 'blob' })
+      record.tree['bar']['baz'].should == 'blob'
+    end
+
   end
 
-  describe'#reload' do
+  describe '#reload' do
 
-    it 'reloads persisted attributes' do
-      o = TestEntity.new(:id => 'foo')
-      o.attributes['A'] = 'A'
-      o.save
-      o.attributes['B'] = 'B'
+    let(:record) do
+      TestEntity.create(:id => 'foo')
+    end
 
-      o.attributes['A'].should == 'A'
-      o.attributes['B'].should == 'B'
-      o.reload
-      o.attributes['A'].should == 'A'
-      o.attributes['B'].should == nil
+    it 'calls load on the instance' do
+      record.should_receive(:load).with(record.path, record.branch)
+      record.reload
     end
 
     it 'returns the reloaded instance' do
-      o = TestEntity.create(:id => 'foo')
-      p = o.reload
-      o.should == p
+      record.reload.should == record
     end
 
     it 'raises an exception if the document is not found' do
       lambda { TestEntity.new.reload }.should raise_error
-      lambda { TestEntity.new(:id => "foo").reload }.should raise_error
+      lambda { TestEntity.new(:id => 'foo').reload }.should raise_error
     end
 
   end
@@ -154,10 +319,10 @@ describe GitModel::Persistable do
       blobs = {'blob1.txt' => 'This is blob 1'}
 
       new_mock = mock("new_mock")
-      TestEntity.should_receive(:new).with(:id => id, :attributes => attrs, :blobs => blobs).and_return(new_mock)
+      TestEntity.should_receive(:new).with(:id => id, :attributes => attrs, :tree => blobs).and_return(new_mock)
       new_mock.should_receive(:save)
 
-      TestEntity.create(:id => id, :attributes => attrs, :blobs => blobs) 
+      TestEntity.create(:id => id, :attributes => attrs, :tree => blobs)
     end
 
     it 'returns an instance of the record created' do
@@ -196,10 +361,10 @@ describe GitModel::Persistable do
       blobs = {'blob1.txt' => 'This is blob 1'}
 
       new_mock = mock("new_mock")
-      TestEntity.should_receive(:new).with(:id => id, :attributes => attrs, :blobs => blobs).and_return(new_mock)
+      TestEntity.should_receive(:new).with(:id => id, :attributes => attrs, :tree => blobs).and_return(new_mock)
       new_mock.should_receive(:save!)
 
-      TestEntity.create!(:id => id, :attributes => attrs, :blobs => blobs) 
+      TestEntity.create!(:id => id, :attributes => attrs, :tree => blobs)
     end
 
     it 'returns an instance of the record created' do
@@ -239,7 +404,7 @@ describe GitModel::Persistable do
 
     it 'also deletes blobs associated with the given object' do
       id = 'Lemuridae'
-      TestEntity.create!(:id => id, :blobs => {:crowned => "Eulemur coronatus", :brown => "Eulemur fulvus"})
+      TestEntity.create!(:id => id, :tree => {:crowned => "Eulemur coronatus", :brown => "Eulemur fulvus"})
       b = GitModel.default_branch
       (GitModel.current_tree(b) / File.join(TestEntity.db_subdir, id, 'crowned')).data.should_not be_nil
       (GitModel.current_tree(b) / File.join(TestEntity.db_subdir, id, 'brown')).data.should_not be_nil
@@ -322,36 +487,36 @@ describe GitModel::Persistable do
       o.attributes.size.should == 2
       o.attributes['one'].should == 1
       o.attributes['two'].should == 2
-      o.blobs.should be_empty
+      o.tree.should be_empty
     end
 
     it 'can load an object with blobs and no attributes' do
       id = 'foo'
       blobs = {'blob1.txt' => 'This is blob 1', 'blob2' => 'This is blob 2'}
-      TestEntity.create!(:id => id, :blobs => blobs)
+      TestEntity.create!(:id => id, :tree => blobs)
 
       o = TestEntity.find(id)
       o.id.should == id
       o.attributes.should be_empty
-      o.blobs.size.should == 2
-      o.blobs["blob1.txt"].should == 'This is blob 1'
-      o.blobs["blob2"].should == 'This is blob 2'
+      o.tree.size.should == 2
+      o.tree["blob1.txt"].should == 'This is blob 1'
+      o.tree["blob2"].should == 'This is blob 2'
     end
 
     it 'can load an object with both attributes and blobs' do
       id = 'foo'
       attrs = {:one => 1, :two => 2}
       blobs = {'blob1.txt' => 'This is blob 1', 'blob2' => 'This is blob 2'}
-      TestEntity.create!(:id => id, :attributes => attrs, :blobs => blobs)
+      TestEntity.create!(:id => id, :attributes => attrs, :tree => blobs)
 
       o = TestEntity.find(id)
       o.id.should == id
       o.attributes.size.should == 2
       o.attributes['one'].should == 1
       o.attributes['two'].should == 2
-      o.blobs.size.should == 2
-      o.blobs["blob1.txt"].should == 'This is blob 1'
-      o.blobs["blob2"].should == 'This is blob 2'
+      o.tree.size.should == 2
+      o.tree["blob1.txt"].should == 'This is blob 1'
+      o.tree["blob2"].should == 'This is blob 2'
     end
 
   end
@@ -567,23 +732,6 @@ describe GitModel::Persistable do
     end
   end
 
-  describe '#blobs' do
-    it 'accepts symbols or strings interchangeably as strings' do
-      o = TestEntity.new(:id => 'lol', :blobs => {"one" => 'this is blob 1', :two => 'this is blob 2'})
-      o.save!
-      o.blobs["one"].should == 'this is blob 1'
-      o.blobs[:one].should == 'this is blob 1'
-      o.blobs["two"].should == 'this is blob 2'
-      o.blobs[:two].should == 'this is blob 2'
-
-      # Should also be true after reloading
-      o = TestEntity.find 'lol'
-      o.blobs["one"].should == 'this is blob 1'
-      o.blobs[:one].should == 'this is blob 1'
-      o.blobs["two"].should == 'this is blob 2'
-      o.blobs[:two].should == 'this is blob 2'
-    end
-  end
 
   describe 'attribute description in the class definition' do
 
@@ -634,7 +782,54 @@ describe GitModel::Persistable do
 
       o.avatar = "image_data_here"
       o.avatar.should == "image_data_here"
-      o.blobs[:avatar].should == "image_data_here"
+      o.tree[:avatar].should == "image_data_here"
+    end
+
+  end
+
+  describe '.tree' do
+
+    let(:record) do
+      foo = TestEntity.dup
+      foo.tree :foo
+      foo.new
+    end
+
+    let(:tree) do
+      { :x => 'blob', :y => { :z => 'blob' } }
+    end
+
+    it 'creates instance-level accessors' do
+      record.should respond_to(:foo)
+      record.should respond_to(:foo=)
+    end
+
+    it 'should return an empty HashWithIndifferentAccess by default via the instance-level getter' do
+      record.foo.should == {}
+      record.foo.should be_a HashWithIndifferentAccess
+    end
+
+    it 'should appropriately set and get via the accessors' do
+      record.foo = tree
+
+      # Check equivalency by comparing values of foo
+      # A comparison cannot be made by record.foo == tree since
+      # the setter converts tree to a HashWithIndifferentAccess
+      record.foo['x'].should == tree[:x]
+      record.foo['y']['z'].should == tree[:y][:z]
+    end
+
+    it 'should update the tree via the generated instance-level setter' do
+      record.foo = tree
+      record.tree['foo'].should == record.foo
+    end
+
+    it 'should provide scoped access to the tree via the generated instance-level getter' do
+      record.foo['x'] = 'blob'
+      record.foo['y'] = tree
+      record.tree['foo']['x'].should == 'blob'
+      record.tree['foo']['y']['x'].should == 'blob'
+      record.tree['foo']['y']['y']['z'].should == 'blob'
     end
 
   end

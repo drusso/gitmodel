@@ -11,6 +11,8 @@ module GitModel
         include ActiveModel::Observing
         include ActiveModel::Translation
 
+        include GitModel::TreeContents
+
         define_model_callbacks :initialize, :find, :touch, :only => :after
         define_model_callbacks :save, :create, :update, :destroy
 
@@ -26,7 +28,6 @@ module GitModel
       _run_initialize_callbacks do
         @new_record = true 
         self.attributes = {}
-        self.blobs = {}
         args.each do |k,v|
           self.send("#{k}=".to_sym, v)
         end
@@ -82,17 +83,6 @@ module GitModel
       end
     end
 
-    def blobs
-      @blobs
-    end
-  
-    def blobs=(new_blobs)
-      @blobs = HashWithIndifferentAccess.new
-      if new_blobs
-        new_blobs.each {|k,v| @blobs[k] = v}
-      end
-    end
-
     def new_record?
       @new_record || false
     end
@@ -123,13 +113,17 @@ module GitModel
 
         transaction = options.delete(:transaction) || GitModel::Transaction.new(options) 
         result = transaction.execute do |t|
+          # Add the tree contents (blobs and trees) to the index
+          #  NOTE: Behaviour regarding the record's tree is inherited from Grit::Index.
+          #  Blobs are represented as strings, and directories as hashes. Existing blobs
+          #  (but not trees) can be deleted by explicity setting the blob's
+          #  value as false. Any other data types are silently ignored by Grit.
+          paths(path) do |path, data|
+            t.index.add(path, data)
+          end
+
           # Write the attributes to the attributes file
           t.index.add(File.join(dir, 'attributes.json'), Yajl::Encoder.encode(attributes, nil, :pretty => true))
-
-          # Write the blob files
-          blobs.each do |name, data|
-            t.index.add(File.join(dir, name), data)
-          end
         end
 
         if result
@@ -162,7 +156,7 @@ module GitModel
     end
 
     def to_s
-      "#<#{self.class.name}:#{__id__} id=#{id}, attributes=#{attributes.inspect}, blobs.keys=#{blobs.keys.inspect}>"
+      "#<#{self.class.name}:#{__id__} id=#{id}, attributes=#{attributes.inspect}, tree.keys=#{tree.keys.inspect}>"
     end
 
 
@@ -181,20 +175,22 @@ module GitModel
 
         self.id = File.basename(dir)
         @new_record = false
-        
+
         GitModel.logger.debug "Loading #{self.class.name} with id: #{id}"
 
+        # get the record's Grit::Tree
+        raw = GitModel.current_tree(branch) / dir
+        raise GitModel::RecordNotFound if raw.nil?
+
         # load the attributes
-        object = GitModel.current_tree(branch) / File.join(dir, 'attributes.json')
-        raise GitModel::RecordNotFound if object.nil?
+        _attributes_blob = raw / 'attributes.json'
+        self.attributes = Yajl::Parser.parse(_attributes_blob.data)
 
-        self.attributes = Yajl::Parser.parse(object.data)
+        # load the tree
+        _tree_contents = raw.contents.reject { |b| b.name == 'attributes.json' } #|| b.name[0] == '.' }
+        self.tree = _tree_contents
 
-        # load all other non-hidden files in the dir as blobs
-        blobs = (GitModel.current_tree(branch) / dir).blobs.reject{|b| b.name[0] == '.' || b.name == 'attributes.json'}
-        blobs.each do |b|
-          self.blobs[b.name] = b.data
-        end
+        self
       end
     end
 
@@ -215,8 +211,15 @@ module GitModel
 
       def blob(name, options = {})
         self.class_eval <<-EOF
-          def #{name}; blobs[:#{name}]; end
-          def #{name}=(value); blobs[:#{name}] = value; end
+          def #{name}; tree[:#{name}]; end
+          def #{name}=(value); tree[:#{name}] = value; end
+        EOF
+      end
+
+      def tree(name, options={})
+        self.class_eval <<-EOF
+          def #{name}; tree[:#{name}] || (tree[:#{name}] = HashWithIndifferentAccess.new); end
+          def #{name}=(value); tree[:#{name}] = value; end
         EOF
       end
 

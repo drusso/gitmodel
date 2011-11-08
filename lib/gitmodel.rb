@@ -15,6 +15,7 @@ $:.unshift(File.dirname(__FILE__))
 require 'gitmodel/errors'
 require 'gitmodel/index'
 require 'gitmodel/tree_contents'
+require 'gitmodel/relations'
 require 'gitmodel/persistable'
 require 'gitmodel/transaction'
 

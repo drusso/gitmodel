@@ -3,7 +3,6 @@ module GitModel
 
     def self.included(base)
       base.class_eval do
-         
         extend ActiveModel::Callbacks
         extend ActiveModel::Naming
         include ActiveModel::Validations
@@ -12,6 +11,7 @@ module GitModel
         include ActiveModel::Translation
 
         include GitModel::TreeContents
+        include GitModel::Relations
 
         define_model_callbacks :initialize, :find, :touch, :only => :after
         define_model_callbacks :save, :create, :update, :destroy
@@ -26,7 +26,7 @@ module GitModel
   
     def initialize(args = {})
       _run_initialize_callbacks do
-        @new_record = true 
+        @new_record = true
         self.attributes = {}
         args.each do |k,v|
           self.send("#{k}=".to_sym, v)
@@ -70,6 +70,26 @@ module GitModel
     # Typically, the branch is 'master'.
     def branch
       @branch ||= GitModel.default_branch
+    end
+
+    def <=>(other_object)
+      if other_object.is_a?(self.class)
+        self.to_key <=> other_object.to_key
+      else
+        nil
+      end
+    end
+    
+    def ==(comparison_object)
+      super ||
+        comparison_object.instance_of?(self.class) &&
+        id.present? &&
+        comparison_object.id == id
+    end
+    alias :eql? :==
+
+    def hash
+      id.hash
     end
 
     def attributes
@@ -153,6 +173,7 @@ module GitModel
     # was last loaded from or last saved to.
     def reload
       load(path, branch)
+      reset_proxies
       self
     end
 

@@ -328,6 +328,13 @@ describe GitModel::Persistable do
 
     pending 'reloads the instance from the branch that the instance was initially loaded from or last saved to'
 
+    it 'removes relational proxies' do
+      o = TestEntity.new(:id => "foo")
+      o.save
+      o.should_receive(:reset_proxies)
+      o.reload
+    end
+
     it 'raises an exception if the document is not found' do
       lambda { TestEntity.new.reload }.should raise_error
       lambda { TestEntity.new(:id => "foo").reload }.should raise_error
